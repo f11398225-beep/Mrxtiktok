@@ -75,7 +75,7 @@ async def download_file(url: str, suffix: str) -> str | None:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "👋 *Привет! Меня создал MRX, для общение с ним напишите ему в личку @M_R_X_W_H_O_A_M_I для скачивание видео/музыки С помощью ссылки тик тока.*\n\n"
+        "👋 *Привет! Меня создал MRX, для общение с ним напишите ему в личку @M_R_X_W_H_O_A_M_I Этот бот создан для скачивание видео/музыки С помощью ссылки тик тока.*\n\n"
         "Просто отправь мне *ссылку на TikTok видео* — и я скачаю его для тебя.\n\n"
         "📌 Поддерживаемые форматы ссылок:\n"
         "• `https://www.tiktok.com/@user/video/...`\n"
@@ -123,7 +123,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
         url = await resolve_short_url(url)
 
-    processing_msg = await message.reply_text("⏳ Получаю информацию о видео...")
+    processing_msg = await message.reply_text("⏳ MRX Получает информацию о видео...")
 
     info = await fetch_tiktok_info(url)
 
@@ -155,7 +155,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"⏱ Длительность: {duration} сек.\n"
         f"▶️ Просмотры: {play_count:,}\n"
         f"❤️ Лайки: {like_count:,}\n\n"
-        f"Что скачать?"
+        f"Что скачать?" 
         f"Бот был создан этим человеком @M_R_X_W_H_O_A_M_I"
     )
 
