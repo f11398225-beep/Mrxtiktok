@@ -155,8 +155,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"⏱ Длительность: {duration} сек.\n"
         f"▶️ Просмотры: {play_count:,}\n"
         f"❤️ Лайки: {like_count:,}\n\n"
-        f"Что скачать?" 
-        f"Бот был создан этим человеком       @M_R_X_W_H_O_A_M_I"
+        f"Что скачать?"
     )
 
     keyboard = InlineKeyboardMarkup([
