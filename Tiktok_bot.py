@@ -18,7 +18,7 @@ from telegram.ext import (
 from telegram.constants import ParseMode, ChatAction
 
 # ─── Конфигурация ──────────────────────────────────────────────────────────────
-BOT_TOKEN = "8791890747:AAHr3-wJt1z9965wYk8FoTbzasQdCXeXfn8"
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8791890747:AAHr3-wJt1z9965wYk8FoTbzasQdCXeXfn8")
 
 TIKTOK_API_URL = "https://tikwm.com/api/"  # Бесплатный API без ключа
 
