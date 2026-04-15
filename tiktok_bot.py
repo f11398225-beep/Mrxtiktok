@@ -75,7 +75,7 @@ async def download_file(url: str, suffix: str) -> str | None:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "👋 *Привет! Меня создал MRX для скачивание видео/музыки С помощью ссылки тик тока@M_R_X_W_H_O_A_M_I*\n\n"
+        "👋 *Привет! Меня создал MRX, для общение с ним напишите ему в личку @M_R_X_W_H_O_A_M_I для скачивание видео/музыки С помощью ссылки тик тока.*\n\n"
         "Просто отправь мне *ссылку на TikTok видео* — и я скачаю его для тебя.\n\n"
         "📌 Поддерживаемые форматы ссылок:\n"
         "• `https://www.tiktok.com/@user/video/...`\n"
