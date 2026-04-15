@@ -75,7 +75,7 @@ async def download_file(url: str, suffix: str) -> str | None:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "👋 *Привет! Я TikTok Downloader Bot*\n\n"
+        "👋 *Привет! Меня создал MRX для скачивание видео/музыки С помощью ссылки тик тока@M_R_X_W_H_O_A_M_I*\n\n"
         "Просто отправь мне *ссылку на TikTok видео* — и я скачаю его для тебя.\n\n"
         "📌 Поддерживаемые форматы ссылок:\n"
         "• `https://www.tiktok.com/@user/video/...`\n"
@@ -156,6 +156,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"▶️ Просмотры: {play_count:,}\n"
         f"❤️ Лайки: {like_count:,}\n\n"
         f"Что скачать?"
+        f"Бот был создан этим человеком @M_R_X_W_H_O_A_M_I"
     )
 
     keyboard = InlineKeyboardMarkup([
