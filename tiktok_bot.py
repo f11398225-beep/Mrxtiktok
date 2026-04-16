@@ -4,7 +4,6 @@ import asyncio
 import aiohttp
 import aiofiles
 import tempfile
-from pathlib import Path
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -20,17 +19,15 @@ from telegram.constants import ParseMode, ChatAction
 # ─── Конфигурация ──────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8791890747:AAHr3-wJt1z9965wYk8FoTbzasQdCXeXfn8")
 
-TIKTOK_API_URL = "https://tikwm.com/api/"  # Бесплатный API без ключа
+TIKTOK_API_URL = "https://tikwm.com/api/"
 
 TIKTOK_LINK_PATTERN = re.compile(
     r"(https?://)?(www\.)?(vm\.|vt\.)?tiktok\.com/[\w\-/@]+"
 )
 
-
 # ─── Утилиты ───────────────────────────────────────────────────────────────────
 
 async def resolve_short_url(url: str) -> str:
-    """Разворачивает короткие ссылки TikTok (vm.tiktok.com)."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
@@ -40,7 +37,6 @@ async def resolve_short_url(url: str) -> str:
 
 
 async def fetch_tiktok_info(url: str) -> dict | None:
-    """Получает информацию о видео через tikwm.com API."""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -57,10 +53,10 @@ async def fetch_tiktok_info(url: str) -> dict | None:
 
 
 async def download_file(url: str, suffix: str) -> str | None:
-    """Скачивает файл во временную папку и возвращает путь."""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status == 200:
                     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
                     async with aiofiles.open(tmp.name, "wb") as f:
@@ -71,76 +67,161 @@ async def download_file(url: str, suffix: str) -> str | None:
     return None
 
 
-# ─── Обработчики ───────────────────────────────────────────────────────────────
+async def search_youtube_music(query: str) -> list:
+    """Ищет музыку через YouTube без API ключа используя ytdl API."""
+    try:
+        search_url = f"https://www.youtube.com/results?search_query={query.replace(' ', '+')}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(search_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                html = await resp.text()
+                # Извлекаем video ID из HTML
+                video_ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
+                titles = re.findall(r'"title":{"runs":\[{"text":"([^"]+)"}\]', html)
+                channels = re.findall(r'"ownerText":{"runs":\[{"text":"([^"]+)"', html)
+
+                results = []
+                seen = set()
+                for i, vid_id in enumerate(video_ids[:10]):
+                    if vid_id not in seen:
+                        seen.add(vid_id)
+                        title = titles[i] if i < len(titles) else "Неизвестно"
+                        channel = channels[i] if i < len(channels) else "Неизвестно"
+                        results.append({
+                            "id": vid_id,
+                            "title": title,
+                            "channel": channel,
+                            "url": f"https://www.youtube.com/watch?v={vid_id}"
+                        })
+                    if len(results) >= 5:
+                        break
+                return results
+    except Exception:
+        return []
+
+
+async def download_youtube_audio(video_id: str) -> str | None:
+    """Скачивает аудио с YouTube через cobalt.tools API."""
+    try:
+        api_url = "https://api.cobalt.tools/api/json"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "vCodec": "h264",
+            "vQuality": "720",
+            "aFormat": "mp3",
+            "isAudioOnly": True,
+        }
+        async with aiohttp.ClientSession() as session:
+            async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                data = await resp.json()
+                if data.get("status") in ("stream", "redirect", "tunnel"):
+                    audio_url = data.get("url")
+                    if audio_url:
+                        return await download_file(audio_url, ".mp3")
+    except Exception:
+        pass
+
+    # Резервный метод — через y2mate-like API
+    try:
+        api_url = f"https://yt-download.org/api/button/mp3/{video_id}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                data = await resp.json()
+                download_url = data.get("url") or data.get("dlink")
+                if download_url:
+                    return await download_file(download_url, ".mp3")
+    except Exception:
+        pass
+
+    return None
+
+
+# ─── Обработчики команд ────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "👋 *Привет! Меня создал MRX, для общение с ним напишите ему в личку @M_R_X_W_H_O_A_M_I Этот бот создан для скачивание видео/музыки С помощью ссылки тик тока.*\n\n"
-        "Просто отправь мне *ссылку на TikTok видео* — и я скачаю его для тебя.\n\n"
-        "📌 Поддерживаемые форматы ссылок:\n"
-        "• `https://www.tiktok.com/@user/video/...`\n"
-        "• `https://vm.tiktok.com/XXXXX/`\n"
-        "• `https://vt.tiktok.com/XXXXX/`\n\n"
-        "Я могу дать тебе:\n"
-        "🎬 *Видео без водяного знака*\n"
-        "🎵 *Только музыку (MP3)*"
+        "👋 *Привет! Я медиа-бот*\n\n"
+        "Что я умею:\n\n"
+        "🎵 *Поиск и скачивание музыки*\n"
+        "Просто напиши название песни, например:\n"
+        "`Eminem Lose Yourself`\n\n"
+        "🎬 *Скачивание TikTok видео*\n"
+        "Отправь ссылку на TikTok:\n"
+        "`https://vm.tiktok.com/XXXXX/`\n\n"
+        "Попробуй прямо сейчас! 👇"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "ℹ️ *Как пользоваться ботом:*\n\n"
-        "1️⃣ Скопируй ссылку на видео TikTok\n"
-        "2️⃣ Отправь её мне в чат\n"
-        "3️⃣ Выбери что скачать: видео или музыку\n\n"
-        "⚡ Всё просто!"
+        "ℹ️ *Как пользоваться:*\n\n"
+        "🎵 *Музыка* — напиши название песни и исполнителя\n"
+        "Пример: `Drake God's Plan`\n\n"
+        "🎬 *TikTok* — отправь ссылку на видео\n"
+        "Пример: `https://vm.tiktok.com/ABC123`\n\n"
+        "🔍 Команда /music — поиск музыки"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
+
+async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = " ".join(context.args)
+    if not query:
+        await update.message.reply_text(
+            "🎵 Напиши название песни после команды:\n`/music Eminem Lose Yourself`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    await search_and_show_music(update, context, query)
+
+
+# ─── Основной обработчик сообщений ────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.message
     text = message.text.strip() if message.text else ""
 
-    # Ищем TikTok ссылку в сообщении
+    # Проверяем — это ссылка TikTok?
     match = TIKTOK_LINK_PATTERN.search(text)
-    if not match:
-        await message.reply_text(
-            "❌ Не нашёл ссылку TikTok в твоём сообщении.\n"
-            "Попробуй скопировать ссылку ещё раз."
-        )
+    if match:
+        await handle_tiktok(update, context, match.group(0))
         return
 
-    url = match.group(0)
+    # Иначе считаем что это поиск музыки
+    if len(text) > 1:
+        await search_and_show_music(update, context, text)
+
+
+# ─── TikTok логика ─────────────────────────────────────────────────────────────
+
+async def handle_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
+    message = update.message
     if not url.startswith("http"):
         url = "https://" + url
 
-    # Покажем индикатор загрузки
     await message.chat.send_action(ChatAction.TYPING)
 
-    # Разворачиваем короткую ссылку
     if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
         url = await resolve_short_url(url)
 
-    processing_msg = await message.reply_text("⏳ MRX Получает информацию о видео...")
-
+    processing_msg = await message.reply_text("⏳ Получаю информацию о видео...")
     info = await fetch_tiktok_info(url)
 
     if not info:
         await processing_msg.edit_text(
-            "❌ Не удалось получить информацию о видео.\n\n"
-            "Возможные причины:\n"
-            "• Видео приватное или удалено\n"
-            "• Неверная ссылка\n"
-            "• Попробуй позже"
+            "❌ Не удалось получить видео.\n"
+            "Возможно видео приватное или удалено."
         )
         return
 
-    # Сохраняем данные в context.user_data
     context.user_data["tiktok_info"] = info
 
-    # Формируем превью
     author = info.get("author", {})
     nickname = author.get("nickname", "Неизвестно")
     desc = info.get("title", "Без описания")[:100]
@@ -159,28 +240,97 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🎬 Видео (без водяного знака)", callback_data="dl_video"),
-        ],
+        [InlineKeyboardButton("🎬 Видео (без водяного знака)", callback_data="dl_video")],
         [
             InlineKeyboardButton("📱 Видео HD", callback_data="dl_video_hd"),
-            InlineKeyboardButton("🎵 Музыка MP3", callback_data="dl_audio"),
+            InlineKeyboardButton("🎵 Музыка из видео", callback_data="dl_audio"),
         ],
     ])
 
     await processing_msg.edit_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
 
+# ─── Музыкальный поиск ─────────────────────────────────────────────────────────
+
+async def search_and_show_music(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
+    message = update.message
+    await message.chat.send_action(ChatAction.TYPING)
+
+    searching_msg = await message.reply_text(f"🔍 Ищу: *{query}*...", parse_mode=ParseMode.MARKDOWN)
+
+    results = await search_youtube_music(query)
+
+    if not results:
+        await searching_msg.edit_text(
+            "❌ Ничего не нашёл. Попробуй написать по-другому.\n"
+            "Пример: `Drake God's Plan`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    context.user_data["music_results"] = results
+
+    text = "🎵 *Результаты поиска:*\n\n"
+    keyboard_buttons = []
+
+    for i, track in enumerate(results):
+        text += f"{i+1}. *{track['title']}*\n   👤 {track['channel']}\n\n"
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                f"⬇️ {i+1}. {track['title'][:35]}",
+                callback_data=f"dl_music_{i}"
+            )
+        ])
+
+    await searching_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+
+
+# ─── Callback обработчик ───────────────────────────────────────────────────────
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
+    action = query.data
 
+    # ── Музыка ──
+    if action.startswith("dl_music_"):
+        index = int(action.split("_")[-1])
+        results = context.user_data.get("music_results", [])
+
+        if index >= len(results):
+            await query.edit_message_text("❌ Ошибка. Попробуй снова.")
+            return
+
+        track = results[index]
+        await query.edit_message_text(f"⬇️ Скачиваю: *{track['title']}*\nПодожди...", parse_mode=ParseMode.MARKDOWN)
+        await query.message.chat.send_action(ChatAction.UPLOAD_VOICE)
+
+        path = await download_youtube_audio(track["id"])
+
+        if not path:
+            await query.edit_message_text(
+                f"❌ Не удалось скачать эту песню.\n"
+                f"Попробуй другой вариант из списка."
+            )
+            return
+
+        async with aiofiles.open(path, "rb") as f:
+            await query.message.reply_audio(
+                audio=await f.read(),
+                title=track["title"][:64],
+                performer=track["channel"][:64],
+                caption=f"🎵 {track['title']}",
+            )
+        os.unlink(path)
+        await query.delete_message()
+        return
+
+    # ── TikTok ──
     info = context.user_data.get("tiktok_info")
     if not info:
         await query.edit_message_text("❌ Сессия устарела. Отправь ссылку снова.")
         return
 
-    action = query.data
     await query.edit_message_text("⬇️ Скачиваю файл, подожди...")
     await query.message.chat.send_action(ChatAction.UPLOAD_VIDEO)
 
@@ -190,18 +340,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if not video_url:
                 await query.edit_message_text("❌ Ссылка на видео не найдена.")
                 return
-
             path = await download_file(video_url, ".mp4")
             if not path:
                 await query.edit_message_text("❌ Не удалось скачать видео.")
                 return
-
-            caption = f"🎬 {info.get('title', '')[:200]}"
-            await query.message.chat.send_action(ChatAction.UPLOAD_VIDEO)
             async with aiofiles.open(path, "rb") as f:
                 await query.message.reply_video(
                     video=await f.read(),
-                    caption=caption,
+                    caption=f"🎬 {info.get('title', '')[:200]}",
                     supports_streaming=True,
                 )
             os.unlink(path)
@@ -212,18 +358,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if not video_url:
                 await query.edit_message_text("❌ HD версия недоступна.")
                 return
-
             path = await download_file(video_url, ".mp4")
             if not path:
                 await query.edit_message_text("❌ Не удалось скачать HD видео.")
                 return
-
-            caption = f"📱 HD: {info.get('title', '')[:200]}"
-            await query.message.chat.send_action(ChatAction.UPLOAD_VIDEO)
             async with aiofiles.open(path, "rb") as f:
                 await query.message.reply_video(
                     video=await f.read(),
-                    caption=caption,
+                    caption=f"📱 HD: {info.get('title', '')[:200]}",
                     supports_streaming=True,
                 )
             os.unlink(path)
@@ -235,16 +377,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             if not audio_url:
                 await query.edit_message_text("❌ Музыка не найдена.")
                 return
-
             path = await download_file(audio_url, ".mp3")
             if not path:
                 await query.edit_message_text("❌ Не удалось скачать музыку.")
                 return
-
             music_title = music.get("title", info.get("title", "TikTok Audio"))
             music_author = music.get("author", "Unknown")
-
-            await query.message.chat.send_action(ChatAction.UPLOAD_VOICE)
             async with aiofiles.open(path, "rb") as f:
                 await query.message.reply_audio(
                     audio=await f.read(),
@@ -256,7 +394,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.delete_message()
 
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка при скачивании: {str(e)[:200]}")
+        await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
 
 
 # ─── Запуск ────────────────────────────────────────────────────────────────────
@@ -266,6 +404,7 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("music", cmd_music))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
