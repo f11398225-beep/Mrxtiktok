@@ -145,8 +145,8 @@ async def download_youtube_audio(video_id: str) -> str | None:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "👋 *Привет! Я медиа-бот*\n\n"
-        "Что я умею:\n\n"
+        "👋 *Привет! Меня создал MRX, для общение с ним напишите ему в личку @M_R_X_W_H_O_A_M_I Этот бот создан для скачивание видео/музыки С помощью ссылки тик тока.*\n\n"
+        "Просто отправь мне ссылку на TikTok видео — и я скачаю его для тебя.\n\n"
         "🎵 *Поиск и скачивание музыки*\n"
         "Просто напиши название песни, например:\n"
         "`Eminem Lose Yourself`\n\n"
