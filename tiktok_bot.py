@@ -67,86 +67,113 @@ async def download_file(url: str, suffix: str) -> str | None:
         pass
     return None
 
-# ─── Поиск музыки через iTunes + Deezer ───────────────────────────────────────
+# ─── Поиск музыки ──────────────────────────────────────────────────────────────
 
-async def search_music(query: str) -> list:
-    """
-    Поиск через iTunes Search API (Apple).
-    Работает везде, без токенов, мгновенно.
-    previewUrl = 30-сек AAC превью от Apple.
-    Для полной версии используем Deezer если есть.
-    """
-    results = []
-
-    # Метод 1 — Deezer (иногда даёт длинные превью ~60-120 сек)
+async def search_spotify_tracks(query: str) -> list:
+    """Ищет треки через Spotify публичный поиск (без токена)."""
     try:
-        url = f"https://api.deezer.com/search?q={query.replace(' ', '+')}&limit=6"
+        # Получаем анонимный токен Spotify
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://open.spotify.com/",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                html = await resp.text()
+                token_match = re.search(r'"accessToken":"([^"]+)"', html)
+                if not token_match:
+                    return []
+                token = token_match.group(1)
+
+            # Поиск треков
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Mozilla/5.0",
+            }
+            params = {"q": query, "type": "track", "limit": 5}
+            async with session.get(
+                "https://api.spotify.com/v1/search",
+                headers=headers,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                data = await resp.json()
+                results = []
+                for item in data.get("tracks", {}).get("items", []):
+                    artists = ", ".join([a["name"] for a in item.get("artists", [])])
+                    results.append({
+                        "title": item["name"],
+                        "artist": artists,
+                        "duration": item["duration_ms"] // 1000,
+                        "spotify_id": item["id"],
+                        "source": "spotify",
+                    })
+                return results
+    except Exception:
+        return []
+
+
+async def get_full_mp3_spotifydown(spotify_id: str) -> str | None:
+    """Скачивает полный MP3 через spotifydown.com API."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://spotifydown.com/",
+            "Origin": "https://spotifydown.com",
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(
+                f"https://api.spotifydown.com/download/{spotify_id}",
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                data = await resp.json()
+                link = data.get("link")
+                if link:
+                    return await download_file(link, ".mp3")
+    except Exception:
+        pass
+    return None
+
+
+async def get_full_mp3_yank(spotify_id: str, artist: str, title: str) -> str | None:
+    """Резерв через yank.g3v.co.uk."""
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://yank.g3v.co.uk/",
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(
+                f"https://yank.g3v.co.uk/track/{spotify_id}",
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                if resp.status == 200:
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
+                    async with aiofiles.open(tmp.name, "wb") as f:
+                        await f.write(await resp.read())
+                    if os.path.getsize(tmp.name) > 500000:  # > 500KB = полный трек
+                        return tmp.name
+                    os.unlink(tmp.name)
+    except Exception:
+        pass
+    return None
+
+
+async def search_deezer(query: str) -> list:
+    """Резерв если Spotify недоступен."""
+    try:
+        url = f"https://api.deezer.com/search?q={query.replace(' ', '+')}&limit=5"
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 data = await resp.json()
-                for track in data.get("data", []):
-                    preview = track.get("preview", "")
-                    if preview:
-                        results.append({
-                            "title": track["title"],
-                            "artist": track["artist"]["name"],
-                            "duration": track.get("duration", 0),
-                            "preview_url": preview,
-                            "source": "deezer",
-                        })
-    except Exception:
-        pass
-
-    # Метод 2 — iTunes как резерв
-    if not results:
-        try:
-            url = f"https://itunes.apple.com/search?term={query.replace(' ', '+')}&media=music&limit=6&entity=song"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                    data = await resp.json()
-                    for track in data.get("results", []):
-                        preview = track.get("previewUrl", "")
-                        if preview:
-                            results.append({
-                                "title": track.get("trackName", "Unknown"),
-                                "artist": track.get("artistName", "Unknown"),
-                                "duration": track.get("trackTimeMillis", 0) // 1000,
-                                "preview_url": preview,
-                                "source": "itunes",
-                            })
-        except Exception:
-            pass
-
-    return results
-
-
-async def search_jiosaavn(query: str) -> list:
-    """JioSaavn — полные треки если доступен."""
-    try:
-        url = f"https://saavn.dev/api/search/songs?query={query.replace(' ', '+')}&limit=5"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=6)) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                items = data.get("data", {}).get("results", [])
                 results = []
-                for item in items:
-                    download_urls = item.get("downloadUrl", [])
-                    mp3_url = ""
-                    for d in reversed(download_urls):
-                        if d.get("url"):
-                            mp3_url = d["url"]
-                            break
-                    if not mp3_url:
-                        continue
-                    artists = ", ".join([a["name"] for a in item.get("artists", {}).get("primary", [])])
+                for track in data.get("data", []):
                     results.append({
-                        "title": item.get("name", "Unknown"),
-                        "artist": artists or "Unknown",
-                        "duration": item.get("duration", 0),
-                        "preview_url": mp3_url,
-                        "source": "jiosaavn",
+                        "title": track["title"],
+                        "artist": track["artist"]["name"],
+                        "duration": track.get("duration", 0),
+                        "preview_url": track.get("preview", ""),
+                        "source": "deezer",
                     })
                 return results
     except Exception:
@@ -172,7 +199,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "ℹ️ *Как пользоваться:*\n\n"
-        "🎵 Напиши название песни — бот найдёт и скачает\n"
+        "🎵 Напиши название песни — бот найдёт и скачает полную версию\n"
         "Пример: `Eminem Lose Yourself`\n\n"
         "🎬 Отправь ссылку TikTok — скачает видео без водяного знака\n\n"
         "По всем вопросам: @M\\_R\\_X\\_W\\_H\\_O\\_A\\_M\\_I"
@@ -196,8 +223,6 @@ async def handle_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
     if not url.startswith("http"):
         url = "https://" + url
     await message.chat.send_action(ChatAction.TYPING)
-
-    # Разворачиваем короткие ссылки
     if any(x in url for x in ["vm.tiktok.com", "vt.tiktok.com"]):
         url = await resolve_short_url(url)
 
@@ -232,12 +257,9 @@ async def search_and_show_music(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.chat.send_action(ChatAction.TYPING)
     msg = await update.message.reply_text(f"🔍 Ищу: *{query}*...", parse_mode=ParseMode.MARKDOWN)
 
-    # Пробуем JioSaavn сначала (полные треки)
-    results = await search_jiosaavn(query)
-
-    # Если недоступен — Deezer/iTunes
+    results = await search_spotify_tracks(query)
     if not results:
-        results = await search_music(query)
+        results = await search_deezer(query)
 
     if not results:
         await msg.edit_text(
@@ -283,30 +305,41 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         await query.message.chat.send_action(ChatAction.UPLOAD_VOICE)
 
-        try:
-            # Отправляем URL напрямую — Telegram скачает сам
-            await query.message.reply_audio(
-                audio=track["preview_url"],
-                title=track["title"][:64],
-                performer=track["artist"][:64],
-                caption=f"🎵 {track['artist']} — {track['title']}",
-            )
-            await query.delete_message()
-        except Exception:
-            # Резерв — скачиваем вручную
-            path = await download_file(track["preview_url"], ".mp3")
+        path = None
+
+        if track.get("source") == "spotify":
+            # Пробуем получить полный трек
+            path = await get_full_mp3_spotifydown(track["spotify_id"])
             if not path:
-                await query.edit_message_text("❌ Не удалось скачать. Попробуй другой вариант.")
-                return
-            async with aiofiles.open(path, "rb") as f:
+                path = await get_full_mp3_yank(track["spotify_id"], track["artist"], track["title"])
+
+        if not path and track.get("preview_url"):
+            # Резерв — отправляем по URL напрямую
+            try:
                 await query.message.reply_audio(
-                    audio=await f.read(),
+                    audio=track["preview_url"],
                     title=track["title"][:64],
                     performer=track["artist"][:64],
                     caption=f"🎵 {track['artist']} — {track['title']}",
                 )
-            os.unlink(path)
-            await query.delete_message()
+                await query.delete_message()
+                return
+            except Exception:
+                path = await download_file(track["preview_url"], ".mp3")
+
+        if not path:
+            await query.edit_message_text("❌ Не удалось скачать. Попробуй другой вариант.")
+            return
+
+        async with aiofiles.open(path, "rb") as f:
+            await query.message.reply_audio(
+                audio=await f.read(),
+                title=track["title"][:64],
+                performer=track["artist"][:64],
+                caption=f"🎵 {track['artist']} — {track['title']}",
+            )
+        os.unlink(path)
+        await query.delete_message()
         return
 
     # ── TikTok ──
