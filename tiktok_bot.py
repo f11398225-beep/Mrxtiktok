@@ -1,5 +1,6 @@
 import os
 import re
+import asyncio
 import aiohttp
 import aiofiles
 import tempfile
@@ -17,7 +18,9 @@ from telegram.constants import ParseMode, ChatAction
 
 # ─── Конфигурация ──────────────────────────────────────────────────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8791890747:AAHr3-wJt1z9965wYk8FoTbzasQdCXeXfn8")
+
 TIKTOK_API_URL = "https://tikwm.com/api/"
+
 TIKTOK_LINK_PATTERN = re.compile(
     r"(https?://)?(www\.)?(vm\.|vt\.)?tiktok\.com/[\w\-/@]+"
 )
@@ -27,11 +30,7 @@ TIKTOK_LINK_PATTERN = re.compile(
 async def resolve_short_url(url: str) -> str:
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                url, allow_redirects=True,
-                timeout=aiohttp.ClientTimeout(total=15),
-                headers={"User-Agent": "Mozilla/5.0"}
-            ) as resp:
+            async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 return str(resp.url)
     except Exception:
         return url
@@ -67,131 +66,94 @@ async def download_file(url: str, suffix: str) -> str | None:
         pass
     return None
 
-# ─── Поиск музыки ──────────────────────────────────────────────────────────────
 
-async def search_spotify_tracks(query: str) -> list:
-    """Ищет треки через Spotify публичный поиск (без токена)."""
+async def search_youtube_music(query: str) -> list:
+    """Ищет музыку через YouTube без API ключа используя ytdl API."""
     try:
-        # Получаем анонимный токен Spotify
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://open.spotify.com/",
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
+        search_url = f"https://www.youtube.com/results?search_query={query.replace(' ', '+')}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(search_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
                 html = await resp.text()
-                token_match = re.search(r'"accessToken":"([^"]+)"', html)
-                if not token_match:
-                    return []
-                token = token_match.group(1)
+                # Извлекаем video ID из HTML
+                video_ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
+                titles = re.findall(r'"title":{"runs":\[{"text":"([^"]+)"}\]', html)
+                channels = re.findall(r'"ownerText":{"runs":\[{"text":"([^"]+)"', html)
 
-            # Поиск треков
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "Mozilla/5.0",
-            }
-            params = {"q": query, "type": "track", "limit": 5}
-            async with session.get(
-                "https://api.spotify.com/v1/search",
-                headers=headers,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                data = await resp.json()
                 results = []
-                for item in data.get("tracks", {}).get("items", []):
-                    artists = ", ".join([a["name"] for a in item.get("artists", [])])
-                    results.append({
-                        "title": item["name"],
-                        "artist": artists,
-                        "duration": item["duration_ms"] // 1000,
-                        "spotify_id": item["id"],
-                        "source": "spotify",
-                    })
+                seen = set()
+                for i, vid_id in enumerate(video_ids[:10]):
+                    if vid_id not in seen:
+                        seen.add(vid_id)
+                        title = titles[i] if i < len(titles) else "Неизвестно"
+                        channel = channels[i] if i < len(channels) else "Неизвестно"
+                        results.append({
+                            "id": vid_id,
+                            "title": title,
+                            "channel": channel,
+                            "url": f"https://www.youtube.com/watch?v={vid_id}"
+                        })
+                    if len(results) >= 5:
+                        break
                 return results
     except Exception:
         return []
 
 
-async def get_full_mp3_spotifydown(spotify_id: str) -> str | None:
-    """Скачивает полный MP3 через spotifydown.com API."""
+async def download_youtube_audio(video_id: str) -> str | None:
+    """Скачивает аудио с YouTube через cobalt.tools API."""
     try:
+        api_url = "https://api.cobalt.tools/api/json"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://spotifydown.com/",
-            "Origin": "https://spotifydown.com",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
         }
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(
-                f"https://api.spotifydown.com/download/{spotify_id}",
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                data = await resp.json()
-                link = data.get("link")
-                if link:
-                    return await download_file(link, ".mp3")
-    except Exception:
-        pass
-    return None
-
-
-async def get_full_mp3_yank(spotify_id: str, artist: str, title: str) -> str | None:
-    """Резерв через yank.g3v.co.uk."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://yank.g3v.co.uk/",
+        payload = {
+            "url": f"https://www.youtube.com/watch?v={video_id}",
+            "vCodec": "h264",
+            "vQuality": "720",
+            "aFormat": "mp3",
+            "isAudioOnly": True,
         }
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(
-                f"https://yank.g3v.co.uk/track/{spotify_id}",
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                if resp.status == 200:
-                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
-                    async with aiofiles.open(tmp.name, "wb") as f:
-                        await f.write(await resp.read())
-                    if os.path.getsize(tmp.name) > 500000:  # > 500KB = полный трек
-                        return tmp.name
-                    os.unlink(tmp.name)
-    except Exception:
-        pass
-    return None
-
-
-async def search_deezer(query: str) -> list:
-    """Резерв если Spotify недоступен."""
-    try:
-        url = f"https://api.deezer.com/search?q={query.replace(' ', '+')}&limit=5"
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+            async with session.post(api_url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 data = await resp.json()
-                results = []
-                for track in data.get("data", []):
-                    results.append({
-                        "title": track["title"],
-                        "artist": track["artist"]["name"],
-                        "duration": track.get("duration", 0),
-                        "preview_url": track.get("preview", ""),
-                        "source": "deezer",
-                    })
-                return results
+                if data.get("status") in ("stream", "redirect", "tunnel"):
+                    audio_url = data.get("url")
+                    if audio_url:
+                        return await download_file(audio_url, ".mp3")
     except Exception:
-        return []
+        pass
 
-# ─── Команды ───────────────────────────────────────────────────────────────────
+    # Резервный метод — через y2mate-like API
+    try:
+        api_url = f"https://yt-download.org/api/button/mp3/{video_id}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get(api_url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+                data = await resp.json()
+                download_url = data.get("url") or data.get("dlink")
+                if download_url:
+                    return await download_file(download_url, ".mp3")
+    except Exception:
+        pass
+
+    return None
+
+
+# ─── Обработчики команд ────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
-        "👋 Привет! Меня создал *MRX*, для общения с ним напишите в личку @M\\_R\\_X\\_W\\_H\\_O\\_A\\_M\\_I\n\n"
-        "Этот бот создан для скачивания видео/музыки с помощью ссылки TikTok, "
-        "а также для поиска и скачивания любой музыки.\n\n"
-        "📌 *Что умею:*\n\n"
-        "🎬 *TikTok видео* — отправь ссылку:\n"
+        "👋 *Привет! Я медиа-бот*\n\n"
+        "Что я умею:\n\n"
+        "🎵 *Поиск и скачивание музыки*\n"
+        "Просто напиши название песни, например:\n"
+        "`Eminem Lose Yourself`\n\n"
+        "🎬 *Скачивание TikTok видео*\n"
+        "Отправь ссылку на TikTok:\n"
         "`https://vm.tiktok.com/XXXXX/`\n\n"
-        "🎵 *Музыка* — напиши название песни:\n"
-        "`Drake God's Plan`\n\n"
-        "Попробуй прямо сейчас 👇"
+        "Попробуй прямо сейчас! 👇"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
@@ -199,49 +161,84 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "ℹ️ *Как пользоваться:*\n\n"
-        "🎵 Напиши название песни — бот найдёт и скачает полную версию\n"
-        "Пример: `Eminem Lose Yourself`\n\n"
-        "🎬 Отправь ссылку TikTok — скачает видео без водяного знака\n\n"
-        "По всем вопросам: @M\\_R\\_X\\_W\\_H\\_O\\_A\\_M\\_I"
+        "🎵 *Музыка* — напиши название песни и исполнителя\n"
+        "Пример: `Drake God's Plan`\n\n"
+        "🎬 *TikTok* — отправь ссылку на видео\n"
+        "Пример: `https://vm.tiktok.com/ABC123`\n\n"
+        "🔍 Команда /music — поиск музыки"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
-# ─── Обработчик сообщений ──────────────────────────────────────────────────────
+
+async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = " ".join(context.args)
+    if not query:
+        await update.message.reply_text(
+            "🎵 Напиши название песни после команды:\n`/music Eminem Lose Yourself`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    await search_and_show_music(update, context, query)
+
+
+# ─── Основной обработчик сообщений ────────────────────────────────────────────
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text.strip() if update.message.text else ""
+    message = update.message
+    text = message.text.strip() if message.text else ""
+
+    # Проверяем — это ссылка TikTok?
     match = TIKTOK_LINK_PATTERN.search(text)
     if match:
         await handle_tiktok(update, context, match.group(0))
-    elif len(text) > 1:
+        return
+
+    # Иначе считаем что это поиск музыки
+    if len(text) > 1:
         await search_and_show_music(update, context, text)
 
-# ─── TikTok ────────────────────────────────────────────────────────────────────
+
+# ─── TikTok логика ─────────────────────────────────────────────────────────────
 
 async def handle_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str) -> None:
     message = update.message
     if not url.startswith("http"):
         url = "https://" + url
+
     await message.chat.send_action(ChatAction.TYPING)
-    if any(x in url for x in ["vm.tiktok.com", "vt.tiktok.com"]):
+
+    if "vm.tiktok.com" in url or "vt.tiktok.com" in url:
         url = await resolve_short_url(url)
 
-    msg = await message.reply_text("⏳ Получаю информацию о видео...")
+    processing_msg = await message.reply_text("⏳ Получаю информацию о видео...")
     info = await fetch_tiktok_info(url)
 
     if not info:
-        await msg.edit_text("❌ Не удалось получить видео. Возможно оно приватное или удалено.")
+        await processing_msg.edit_text(
+            "❌ Не удалось получить видео.\n"
+            "Возможно видео приватное или удалено."
+        )
         return
 
     context.user_data["tiktok_info"] = info
+
     author = info.get("author", {})
+    nickname = author.get("nickname", "Неизвестно")
+    desc = info.get("title", "Без описания")[:100]
+    duration = info.get("duration", 0)
+    play_count = info.get("play_count", 0)
+    like_count = info.get("digg_count", 0)
+
     caption = (
         f"✅ *Видео найдено!*\n\n"
-        f"👤 {author.get('nickname', '?')}\n"
-        f"📝 {info.get('title', '')[:100]}\n"
-        f"⏱ {info.get('duration', 0)} сек. | ❤️ {info.get('digg_count', 0):,}\n\n"
+        f"👤 Автор: {nickname}\n"
+        f"📝 {desc}\n"
+        f"⏱ Длительность: {duration} сек.\n"
+        f"▶️ Просмотры: {play_count:,}\n"
+        f"❤️ Лайки: {like_count:,}\n\n"
         f"Что скачать?"
     )
+
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🎬 Видео (без водяного знака)", callback_data="dl_video")],
         [
@@ -249,21 +246,24 @@ async def handle_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
             InlineKeyboardButton("🎵 Музыка из видео", callback_data="dl_audio"),
         ],
     ])
-    await msg.edit_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
-# ─── Поиск музыки ──────────────────────────────────────────────────────────────
+    await processing_msg.edit_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
+
+
+# ─── Музыкальный поиск ─────────────────────────────────────────────────────────
 
 async def search_and_show_music(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
-    await update.message.chat.send_action(ChatAction.TYPING)
-    msg = await update.message.reply_text(f"🔍 Ищу: *{query}*...", parse_mode=ParseMode.MARKDOWN)
+    message = update.message
+    await message.chat.send_action(ChatAction.TYPING)
 
-    results = await search_spotify_tracks(query)
-    if not results:
-        results = await search_deezer(query)
+    searching_msg = await message.reply_text(f"🔍 Ищу: *{query}*...", parse_mode=ParseMode.MARKDOWN)
+
+    results = await search_youtube_music(query)
 
     if not results:
-        await msg.edit_text(
-            "❌ Ничего не нашёл. Попробуй иначе.\nПример: `Drake God's Plan`",
+        await searching_msg.edit_text(
+            "❌ Ничего не нашёл. Попробуй написать по-другому.\n"
+            "Пример: `Drake God's Plan`",
             parse_mode=ParseMode.MARKDOWN
         )
         return
@@ -271,19 +271,21 @@ async def search_and_show_music(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["music_results"] = results
 
     text = "🎵 *Результаты поиска:*\n\n"
-    buttons = []
-    for i, track in enumerate(results[:5]):
-        mins = track['duration'] // 60
-        secs = track['duration'] % 60
-        text += f"{i+1}. *{track['title']}*\n   👤 {track['artist']} | ⏱ {mins}:{secs:02d}\n\n"
-        buttons.append([InlineKeyboardButton(
-            f"⬇️ {i+1}. {track['artist']} — {track['title'][:30]}",
-            callback_data=f"dl_music_{i}"
-        )])
+    keyboard_buttons = []
 
-    await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
+    for i, track in enumerate(results):
+        text += f"{i+1}. *{track['title']}*\n   👤 {track['channel']}\n\n"
+        keyboard_buttons.append([
+            InlineKeyboardButton(
+                f"⬇️ {i+1}. {track['title'][:35]}",
+                callback_data=f"dl_music_{i}"
+            )
+        ])
 
-# ─── Callback ──────────────────────────────────────────────────────────────────
+    await searching_msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard_buttons))
+
+
+# ─── Callback обработчик ───────────────────────────────────────────────────────
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -294,49 +296,30 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if action.startswith("dl_music_"):
         index = int(action.split("_")[-1])
         results = context.user_data.get("music_results", [])
+
         if index >= len(results):
             await query.edit_message_text("❌ Ошибка. Попробуй снова.")
             return
 
         track = results[index]
-        await query.edit_message_text(
-            f"⬇️ *{track['artist']} — {track['title']}*",
-            parse_mode=ParseMode.MARKDOWN
-        )
+        await query.edit_message_text(f"⬇️ Скачиваю: *{track['title']}*\nПодожди...", parse_mode=ParseMode.MARKDOWN)
         await query.message.chat.send_action(ChatAction.UPLOAD_VOICE)
 
-        path = None
-
-        if track.get("source") == "spotify":
-            # Пробуем получить полный трек
-            path = await get_full_mp3_spotifydown(track["spotify_id"])
-            if not path:
-                path = await get_full_mp3_yank(track["spotify_id"], track["artist"], track["title"])
-
-        if not path and track.get("preview_url"):
-            # Резерв — отправляем по URL напрямую
-            try:
-                await query.message.reply_audio(
-                    audio=track["preview_url"],
-                    title=track["title"][:64],
-                    performer=track["artist"][:64],
-                    caption=f"🎵 {track['artist']} — {track['title']}",
-                )
-                await query.delete_message()
-                return
-            except Exception:
-                path = await download_file(track["preview_url"], ".mp3")
+        path = await download_youtube_audio(track["id"])
 
         if not path:
-            await query.edit_message_text("❌ Не удалось скачать. Попробуй другой вариант.")
+            await query.edit_message_text(
+                f"❌ Не удалось скачать эту песню.\n"
+                f"Попробуй другой вариант из списка."
+            )
             return
 
         async with aiofiles.open(path, "rb") as f:
             await query.message.reply_audio(
                 audio=await f.read(),
                 title=track["title"][:64],
-                performer=track["artist"][:64],
-                caption=f"🎵 {track['artist']} — {track['title']}",
+                performer=track["channel"][:64],
+                caption=f"🎵 {track['title']}",
             )
         os.unlink(path)
         await query.delete_message()
@@ -355,28 +338,36 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if action == "dl_video":
             video_url = info.get("play") or info.get("wmplay")
             if not video_url:
-                await query.edit_message_text("❌ Ссылка не найдена.")
+                await query.edit_message_text("❌ Ссылка на видео не найдена.")
                 return
             path = await download_file(video_url, ".mp4")
             if not path:
-                await query.edit_message_text("❌ Не удалось скачать.")
+                await query.edit_message_text("❌ Не удалось скачать видео.")
                 return
             async with aiofiles.open(path, "rb") as f:
-                await query.message.reply_video(video=await f.read(), caption=f"🎬 {info.get('title', '')[:200]}", supports_streaming=True)
+                await query.message.reply_video(
+                    video=await f.read(),
+                    caption=f"🎬 {info.get('title', '')[:200]}",
+                    supports_streaming=True,
+                )
             os.unlink(path)
             await query.delete_message()
 
         elif action == "dl_video_hd":
             video_url = info.get("hdplay") or info.get("play")
             if not video_url:
-                await query.edit_message_text("❌ HD недоступно.")
+                await query.edit_message_text("❌ HD версия недоступна.")
                 return
             path = await download_file(video_url, ".mp4")
             if not path:
-                await query.edit_message_text("❌ Не удалось скачать.")
+                await query.edit_message_text("❌ Не удалось скачать HD видео.")
                 return
             async with aiofiles.open(path, "rb") as f:
-                await query.message.reply_video(video=await f.read(), caption=f"📱 HD: {info.get('title', '')[:200]}", supports_streaming=True)
+                await query.message.reply_video(
+                    video=await f.read(),
+                    caption=f"📱 HD: {info.get('title', '')[:200]}",
+                    supports_streaming=True,
+                )
             os.unlink(path)
             await query.delete_message()
 
@@ -388,28 +379,38 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             path = await download_file(audio_url, ".mp3")
             if not path:
-                await query.edit_message_text("❌ Не удалось скачать.")
+                await query.edit_message_text("❌ Не удалось скачать музыку.")
                 return
             music_title = music.get("title", info.get("title", "TikTok Audio"))
             music_author = music.get("author", "Unknown")
             async with aiofiles.open(path, "rb") as f:
-                await query.message.reply_audio(audio=await f.read(), title=music_title[:64], performer=music_author[:64], caption=f"🎵 {music_title}")
+                await query.message.reply_audio(
+                    audio=await f.read(),
+                    title=music_title[:64],
+                    performer=music_author[:64],
+                    caption=f"🎵 {music_title}",
+                )
             os.unlink(path)
             await query.delete_message()
 
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
 
+
 # ─── Запуск ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("music", cmd_music))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    print("🤖 Бот запущен!")
+
+    print("🤖 Бот запущен! Нажми Ctrl+C для остановки.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == "__main__":
     main()
