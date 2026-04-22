@@ -4,7 +4,6 @@ import asyncio
 import aiohttp
 import aiofiles
 import tempfile
-import json
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -24,7 +23,7 @@ TIKTOK_LINK_PATTERN = re.compile(
     r"(https?://)?(www\.)?(vm\.|vt\.)?tiktok\.com/[\w\-/@]+"
 )
 
-# ─── Утилиты TikTok ────────────────────────────────────────────────────────────
+# ─── Утилиты ───────────────────────────────────────────────────────────────────
 
 async def resolve_short_url(url: str) -> str:
     try:
@@ -56,182 +55,72 @@ async def download_file(url: str, suffix: str) -> str | None:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*",
-            "Referer": "https://www.youtube.com/",
         }
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=180)) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status == 200:
                     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
                     async with aiofiles.open(tmp.name, "wb") as f:
                         await f.write(await resp.read())
-                    if os.path.getsize(tmp.name) > 10000:  # минимум 10KB
+                    if os.path.getsize(tmp.name) > 50000:  # минимум 50KB = реальный трек
                         return tmp.name
                     os.unlink(tmp.name)
     except Exception:
         pass
     return None
 
+# ─── JioSaavn API — бесплатно, без токена, прямые MP3 ─────────────────────────
 
-# ─── Получение прямой ссылки на MP3 через несколько API ───────────────────────
-
-async def get_youtube_video_id(query: str) -> str | None:
-    """Ищет видео на YouTube и возвращает первый video ID."""
+async def search_jiosaavn(query: str) -> list:
+    """Поиск через JioSaavn — огромная база, мгновенные прямые ссылки."""
     try:
-        search_url = "https://www.youtube.com/results?search_query=" + query.replace(" ", "+")
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(search_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                html = await resp.text()
-                ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
-                return ids[0] if ids else None
-    except Exception:
-        return None
-
-
-async def get_mp3_via_loader_to(video_id: str) -> str | None:
-    """loader.to API — дает прямую ссылку на MP3."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://loader.to/",
-        }
-        # Шаг 1 — запрос конвертации
-        url = f"https://loader.to/ajax/download.php?format=mp3&url=https://www.youtube.com/watch?v={video_id}"
-        async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=20)) as resp:
-                data = await resp.json()
-                task_id = data.get("id")
-                if not task_id:
-                    return None
-
-            # Шаг 2 — ждём готовности
-            for _ in range(20):
-                await asyncio.sleep(3)
-                progress_url = f"https://loader.to/ajax/progress.php?id={task_id}"
-                async with session.get(progress_url, timeout=aiohttp.ClientTimeout(total=10)) as resp2:
-                    progress = await resp2.json()
-                    if progress.get("success") == 1:
-                        download_url = progress.get("download_url")
-                        if download_url:
-                            return await download_file(download_url, ".mp3")
-    except Exception:
-        pass
-    return None
-
-
-async def get_mp3_via_y2mate(video_id: str) -> str | None:
-    """y2mate API."""
-    try:
-        headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Referer": "https://www.y2mate.com/",
-        }
-        # Шаг 1 — анализ
-        async with aiohttp.ClientSession(headers=headers) as session:
-            data1 = f"k_query=https://www.youtube.com/watch?v={video_id}&k_page=home&hl=en&q_auto=0"
-            async with session.post(
-                "https://www.y2mate.com/mates/analyzeV2/ajax",
-                data=data1,
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as resp:
-                result = await resp.json()
-                links = result.get("links", {}).get("mp3", {})
-                # Берём лучшее качество
-                best_key = None
-                for key, val in links.items():
-                    if "128" in str(val.get("q", "")):
-                        best_key = val.get("k")
-                        break
-                if not best_key and links:
-                    best_key = list(links.values())[0].get("k")
-                if not best_key:
-                    return None
-
-            # Шаг 2 — конвертация
-            data2 = f"vid={video_id}&k={best_key}"
-            async with session.post(
-                "https://www.y2mate.com/mates/convertV2/index",
-                data=data2,
-                timeout=aiohttp.ClientTimeout(total=60)
-            ) as resp:
-                result2 = await resp.json()
-                dl_url = result2.get("dlink")
-                if dl_url:
-                    return await download_file(dl_url, ".mp3")
-    except Exception:
-        pass
-    return None
-
-
-async def get_mp3_via_cobalt(video_id: str) -> str | None:
-    """cobalt.tools — современный конвертер."""
-    try:
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "url": f"https://www.youtube.com/watch?v={video_id}",
-            "downloadMode": "audio",
-            "audioFormat": "mp3",
-            "audioBitrate": "128",
-        }
+        url = f"https://saavn.dev/api/search/songs?query={query.replace(' ', '+')}&limit=5"
         async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.cobalt.tools/",
-                json=payload,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 data = await resp.json()
-                status = data.get("status")
-                if status in ("stream", "redirect", "tunnel"):
-                    url = data.get("url")
-                    if url:
-                        return await download_file(url, ".mp3")
-    except Exception:
-        pass
-    return None
-
-
-async def download_full_music(artist: str, title: str) -> str | None:
-    """Пробует все методы по очереди."""
-    query = f"{artist} {title} official audio"
-    video_id = await get_youtube_video_id(query)
-    if not video_id:
-        return None
-
-    # Пробуем методы один за другим
-    for method in [get_mp3_via_cobalt, get_mp3_via_loader_to, get_mp3_via_y2mate]:
-        path = await method(video_id)
-        if path:
-            return path
-
-    return None
-
-
-# ─── Поиск через Deezer ────────────────────────────────────────────────────────
-
-async def search_deezer(query: str) -> list:
-    try:
-        url = f"https://api.deezer.com/search?q={query.replace(' ', '+')}&limit=5"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                data = await resp.json()
+                items = data.get("data", {}).get("results", [])
                 results = []
-                for track in data.get("data", []):
+                for item in items:
+                    # Берём лучшее качество из доступных
+                    download_urls = item.get("downloadUrl", [])
+                    mp3_url = ""
+                    for d in reversed(download_urls):  # reversed = лучшее качество первым
+                        if d.get("url"):
+                            mp3_url = d["url"]
+                            break
+                    if not mp3_url:
+                        continue
+                    artists = ", ".join([a["name"] for a in item.get("artists", {}).get("primary", [])])
                     results.append({
-                        "id": track["id"],
-                        "title": track["title"],
-                        "artist": track["artist"]["name"],
-                        "preview": track.get("preview", ""),
-                        "duration": track.get("duration", 0),
+                        "title": item.get("name", "Unknown"),
+                        "artist": artists or "Unknown",
+                        "duration": item.get("duration", 0),
+                        "url": mp3_url,
                     })
                 return results
     except Exception:
         return []
 
+
+async def search_deezer_preview(query: str) -> list:
+    """Резервный поиск через Deezer (30 сек превью) если JioSaavn не дал результатов."""
+    try:
+        url = f"https://api.deezer.com/search?q={query.replace(' ', '+')}&limit=5"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                data = await resp.json()
+                results = []
+                for track in data.get("data", []):
+                    results.append({
+                        "title": track["title"],
+                        "artist": track["artist"]["name"],
+                        "duration": track.get("duration", 0),
+                        "url": track.get("preview", ""),
+                        "preview": True,
+                    })
+                return results
+    except Exception:
+        return []
 
 # ─── Команды ───────────────────────────────────────────────────────────────────
 
@@ -253,24 +142,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "ℹ️ *Как пользоваться:*\n\n"
-        "🎵 Напиши название песни — бот найдёт и скачает полную версию\n"
+        "🎵 Напиши название песни — бот найдёт и скачает\n"
         "Пример: `Eminem Lose Yourself`\n\n"
         "🎬 Отправь ссылку TikTok — бот скачает видео без водяного знака\n\n"
         "По всем вопросам: @M\\_R\\_X\\_W\\_H\\_O\\_A\\_M\\_I"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-
-
-async def cmd_music(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = " ".join(context.args)
-    if not query:
-        await update.message.reply_text(
-            "🎵 Напиши название:\n`/music Eminem Lose Yourself`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    await search_and_show_music(update, context, query)
-
 
 # ─── Обработчик сообщений ──────────────────────────────────────────────────────
 
@@ -281,7 +158,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await handle_tiktok(update, context, match.group(0))
     elif len(text) > 1:
         await search_and_show_music(update, context, text)
-
 
 # ─── TikTok ────────────────────────────────────────────────────────────────────
 
@@ -318,14 +194,18 @@ async def handle_tiktok(update: Update, context: ContextTypes.DEFAULT_TYPE, url:
     ])
     await msg.edit_text(caption, parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
-
 # ─── Поиск музыки ──────────────────────────────────────────────────────────────
 
 async def search_and_show_music(update: Update, context: ContextTypes.DEFAULT_TYPE, query: str) -> None:
     await update.message.chat.send_action(ChatAction.TYPING)
     msg = await update.message.reply_text(f"🔍 Ищу: *{query}*...", parse_mode=ParseMode.MARKDOWN)
 
-    results = await search_deezer(query)
+    results = await search_jiosaavn(query)
+    is_preview = False
+
+    if not results:
+        results = await search_deezer_preview(query)
+        is_preview = True
 
     if not results:
         await msg.edit_text(
@@ -335,6 +215,8 @@ async def search_and_show_music(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     context.user_data["music_results"] = results
+    context.user_data["music_preview"] = is_preview
+
     text = "🎵 *Результаты поиска:*\n\n"
     buttons = []
 
@@ -349,7 +231,6 @@ async def search_and_show_music(update: Update, context: ContextTypes.DEFAULT_TY
 
     await msg.edit_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
-
 # ─── Callback ──────────────────────────────────────────────────────────────────
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -357,41 +238,44 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     action = query.data
 
-    # ── Скачать музыку ──
     if action.startswith("dl_music_"):
         index = int(action.split("_")[-1])
         results = context.user_data.get("music_results", [])
+        is_preview = context.user_data.get("music_preview", False)
+
         if index >= len(results):
             await query.edit_message_text("❌ Ошибка. Попробуй снова.")
             return
 
         track = results[index]
         await query.edit_message_text(
-            f"⬇️ Скачиваю: *{track['artist']} — {track['title']}*\n\nПодожди, это займёт 30-60 сек...",
+            f"⬇️ Скачиваю: *{track['artist']} — {track['title']}*",
             parse_mode=ParseMode.MARKDOWN
         )
         await query.message.chat.send_action(ChatAction.UPLOAD_VOICE)
 
-        path = await download_full_music(track["artist"], track["title"])
+        path = await download_file(track["url"], ".mp3")
 
-        if path:
-            async with aiofiles.open(path, "rb") as f:
-                await query.message.reply_audio(
-                    audio=await f.read(),
-                    title=track["title"][:64],
-                    performer=track["artist"][:64],
-                    caption=f"🎵 {track['artist']} — {track['title']}",
-                )
-            os.unlink(path)
-            await query.delete_message()
-        else:
-            await query.edit_message_text(
-                f"❌ Не удалось скачать полную версию.\n"
-                f"Попробуй другой трек из списка или поищи снова."
+        if not path:
+            await query.edit_message_text("❌ Не удалось скачать. Попробуй другой вариант.")
+            return
+
+        caption = f"🎵 {track['artist']} — {track['title']}"
+        if is_preview:
+            caption += "\n⚠️ Превью 30 сек"
+
+        async with aiofiles.open(path, "rb") as f:
+            await query.message.reply_audio(
+                audio=await f.read(),
+                title=track["title"][:64],
+                performer=track["artist"][:64],
+                caption=caption,
             )
+        os.unlink(path)
+        await query.delete_message()
         return
 
-    # ── TikTok callbacks ──
+    # ── TikTok ──
     info = context.user_data.get("tiktok_info")
     if not info:
         await query.edit_message_text("❌ Сессия устарела. Отправь ссылку снова.")
@@ -404,36 +288,28 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if action == "dl_video":
             video_url = info.get("play") or info.get("wmplay")
             if not video_url:
-                await query.edit_message_text("❌ Ссылка на видео не найдена.")
+                await query.edit_message_text("❌ Ссылка не найдена.")
                 return
             path = await download_file(video_url, ".mp4")
             if not path:
-                await query.edit_message_text("❌ Не удалось скачать видео.")
+                await query.edit_message_text("❌ Не удалось скачать.")
                 return
             async with aiofiles.open(path, "rb") as f:
-                await query.message.reply_video(
-                    video=await f.read(),
-                    caption=f"🎬 {info.get('title', '')[:200]}",
-                    supports_streaming=True,
-                )
+                await query.message.reply_video(video=await f.read(), caption=f"🎬 {info.get('title', '')[:200]}", supports_streaming=True)
             os.unlink(path)
             await query.delete_message()
 
         elif action == "dl_video_hd":
             video_url = info.get("hdplay") or info.get("play")
             if not video_url:
-                await query.edit_message_text("❌ HD версия недоступна.")
+                await query.edit_message_text("❌ HD недоступно.")
                 return
             path = await download_file(video_url, ".mp4")
             if not path:
-                await query.edit_message_text("❌ Не удалось скачать HD видео.")
+                await query.edit_message_text("❌ Не удалось скачать.")
                 return
             async with aiofiles.open(path, "rb") as f:
-                await query.message.reply_video(
-                    video=await f.read(),
-                    caption=f"📱 HD: {info.get('title', '')[:200]}",
-                    supports_streaming=True,
-                )
+                await query.message.reply_video(video=await f.read(), caption=f"📱 HD: {info.get('title', '')[:200]}", supports_streaming=True)
             os.unlink(path)
             await query.delete_message()
 
@@ -445,23 +321,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 return
             path = await download_file(audio_url, ".mp3")
             if not path:
-                await query.edit_message_text("❌ Не удалось скачать музыку.")
+                await query.edit_message_text("❌ Не удалось скачать.")
                 return
             music_title = music.get("title", info.get("title", "TikTok Audio"))
             music_author = music.get("author", "Unknown")
             async with aiofiles.open(path, "rb") as f:
-                await query.message.reply_audio(
-                    audio=await f.read(),
-                    title=music_title[:64],
-                    performer=music_author[:64],
-                    caption=f"🎵 {music_title}",
-                )
+                await query.message.reply_audio(audio=await f.read(), title=music_title[:64], performer=music_author[:64], caption=f"🎵 {music_title}")
             os.unlink(path)
             await query.delete_message()
 
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {str(e)[:200]}")
-
 
 # ─── Запуск ────────────────────────────────────────────────────────────────────
 
@@ -469,12 +339,10 @@ def main() -> None:
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("music", cmd_music))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
     print("🤖 Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
